@@ -4,6 +4,7 @@ import uuid
 import random
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -335,6 +336,7 @@ def home():
             <form action="/api/events" method="post">
                 <input type="text" name="title" placeholder="Event title (e.g., Friday Night)" required>
                 <input type="date" name="date" required>
+                <input type="time" name="time" required>
                 <button type="submit">Create Event</button>
             </form>
         </div>
@@ -348,18 +350,21 @@ def home():
 # -----------------------------
 
 @app.post("/api/events")
-def create_event(title: str = Form(...), date: str = Form(...)):
+def create_event(title: str = Form(...), date: str = Form(...), time: str = Form(...)):
     event_id = uuid.uuid4().hex[:8]
+    admin_token = uuid.uuid4().hex[:16]
     event = {
         "id": event_id,
         "title": title,
         "date": date,
+        "time": time,
+        "admin_token": admin_token,
         "picks": [],
         "finalized": False,
         "selected_movie": None,
     }
     save_event(event)
-    return RedirectResponse(url=f"/m/{event_id}", status_code=303)
+    return RedirectResponse(url=f"/m/{event_id}?admin={admin_token}", status_code=303)
 
 
 # -----------------------------
@@ -367,11 +372,12 @@ def create_event(title: str = Form(...), date: str = Form(...)):
 # -----------------------------
 
 @app.get("/m/{event_id}", response_class=HTMLResponse)
-def view_event(event_id: str, error: str = None, success: str = None):
+def view_event(event_id: str, error: str = None, success: str = None, admin: str = None):
     event = get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    is_admin = admin and admin == event.get("admin_token")
     error_html = f'<div class="error">{error}</div>' if error else ""
     success_html = f'<div class="success">{success}</div>' if success else ""
 
@@ -437,7 +443,7 @@ def view_event(event_id: str, error: str = None, success: str = None):
         <body>
             <div class="card">
                 <h1>🎬 {event["title"]}</h1>
-                <p class="meta">📅 {event["date"]}</p>
+                <p class="meta">📅 {event["date"]} at {event.get("time", "")}</p>
 
                 <div class="winner">
                     <div style="opacity:0.9; margin-bottom:10px;">🎉 Tonight's Movie</div>
@@ -459,25 +465,28 @@ def view_event(event_id: str, error: str = None, success: str = None):
         </html>
         """
 
-    # Not finalized: show form + autocomplete JS
-    return f"""
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{event["title"]} - Movie Night</title>
-        <style>{base_styles()}</style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>🎬 {event["title"]}</h1>
-            <p class="meta">📅 {event["date"]}</p>
-            {error_html}
-            {success_html}
+    # Check if submissions are still open
+    event_datetime_str = f"{event['date']} {event.get('time', '00:00')}"
+    event_datetime = datetime.strptime(event_datetime_str, "%Y-%m-%d %H:%M")
+    submissions_open = datetime.now() < event_datetime
 
-            <h2>Share This Link</h2>
-            <div class="link-box">{share_url}</div>
+    # Admin links
+    admin_url = f"/m/{event_id}?admin={event.get('admin_token')}"
+    admin_section = ""
+    if is_admin:
+        admin_section = f'''
+            <div class="success" style="text-align: left;">
+                <strong>🔑 Admin Access</strong><br>
+                You are viewing as admin. Save this link to manage the event:<br>
+                <div class="link-box" style="margin-top: 8px;">{admin_url}</div>
+            </div>
+        '''
 
+    # Submission form
+    if submissions_open:
+        submission_form = f'''
             <h2>Submit Your Picks</h2>
+            <p class="meta">Submissions close at {event.get("time", "")} on {event["date"]}</p>
             <form action="/api/events/{event_id}/picks" method="post">
                 <input type="text" name="name" placeholder="Your name" required>
 
@@ -495,13 +504,50 @@ def view_event(event_id: str, error: str = None, success: str = None):
 
                 <button type="submit">Submit Picks</button>
             </form>
+        '''
+    else:
+        submission_form = '''
+            <div class="error">
+                <strong>⏰ Submissions Closed</strong><br>
+                The movie night has started. No more submissions allowed.
+            </div>
+        '''
+
+    # Finalize button (admin only)
+    finalize_button = ""
+    if is_admin:
+        finalize_button = f'''
+            <form action="/api/events/{event_id}/finalize" method="post" style="margin-top: 20px;">
+                <input type="hidden" name="admin_token" value="{event.get('admin_token')}">
+                <button type="submit" class="danger">🎲 Finalize & Pick Winner</button>
+            </form>
+        '''
+
+    # Not finalized: show form + autocomplete JS
+    return f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{event["title"]} - Movie Night</title>
+        <style>{base_styles()}</style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>🎬 {event["title"]}</h1>
+            <p class="meta">📅 {event["date"]} at {event.get("time", "")}</p>
+            {error_html}
+            {success_html}
+            {admin_section}
+
+            <h2>Share This Link</h2>
+            <div class="link-box">{share_url}</div>
+
+            {submission_form}
 
             <h2>Current Submissions ({len(event["picks"])})</h2>
             {picks_html}
 
-            <form action="/api/events/{event_id}/finalize" method="post" style="margin-top: 20px;">
-                <button type="submit" class="danger">🎲 Finalize & Pick Winner</button>
-            </form>
+            {finalize_button}
         </div>
 
         <script>
@@ -617,6 +663,15 @@ def submit_picks(
             status_code=303,
         )
 
+    # Check if event has already started
+    event_datetime_str = f"{event['date']} {event['time']}"
+    event_datetime = datetime.strptime(event_datetime_str, "%Y-%m-%d %H:%M")
+    if datetime.now() >= event_datetime:
+        return RedirectResponse(
+            url=f"/m/{event_id}?error=Movie night has started. Submissions are closed.",
+            status_code=303,
+        )
+
     if not movie1.strip() or not movie2.strip():
         return RedirectResponse(
             url=f"/m/{event_id}?error=Please provide exactly 2 movie picks.",
@@ -655,10 +710,17 @@ def submit_picks(
 # -----------------------------
 
 @app.post("/api/events/{event_id}/finalize")
-def finalize_event(event_id: str):
+def finalize_event(event_id: str, admin_token: str = Form(...)):
     event = get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Verify admin token
+    if event.get("admin_token") != admin_token:
+        return RedirectResponse(
+            url=f"/m/{event_id}?error=Unauthorized. Only the event admin can finalize.",
+            status_code=303,
+        )
 
     if event["finalized"]:
         return RedirectResponse(
